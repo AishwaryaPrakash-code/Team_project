@@ -1,0 +1,178 @@
+import logging
+import asyncio
+import mini.mini_sdk as Mini
+from mini.dns.dns_browser import WiFiDevice
+from mini.apis.api_sound import StartPlayTTS
+from mini.apis.base_api import MiniApiResultType
+from mini.apis.api_action import MoveRobot, MoveRobotDirection
+from mini.apis.api_observe import ObserveSpeechRecognise
+from mini.pb2.codemao_speechrecognise_pb2 import SpeechRecogniseResponse
+import json
+import os
+
+# Logging configuration
+Mini.set_log_level(logging.INFO)
+Mini.set_robot_type(Mini.RobotType.EDU)
+
+# File to store the last selected index
+INDEX_FILE = "order_index.json"
+
+# Function to load the last selected index
+def load_index():
+    if os.path.exists(INDEX_FILE):
+        with open(INDEX_FILE, 'r') as f:
+            return json.load(f).get("current_index", 0)
+    return 0
+
+# Function to save the current selected index
+def save_index(index):
+    with open(INDEX_FILE, 'w') as f:
+        json.dump({"current_index": index}, f)
+
+# Function for Text-to-Speech (TTS)
+async def _play_tts(text):
+    block: StartPlayTTS = StartPlayTTS(text=text)
+    (resultType, response) = await block.execute()
+    print(f'TTS result: {response}')
+    return
+
+# Waiter Bot Implementation
+class WaiterBot:
+    def __init__(self):
+        self.menu = {
+            '1': 'Spaghetti',
+            '2': 'Burger',
+            '3': 'Salad',
+            '4': 'Pizza'
+        }
+        self.order_list = []
+        self.observe = ObserveSpeechRecognise()
+        self.current_index = load_index()  # Load the last selected index
+
+    async def introduce_self(self):
+        introduction = "Hello! I am Dine Bot, your waiter for this evening. Welcome!"
+        await _play_tts(introduction)
+        print(introduction)
+
+    async def welcome_guest(self):
+        welcome_message = "Welcome to our restaurant! Here is the menu."
+        await _play_tts(welcome_message)
+        print(welcome_message)
+        await self.display_menu()
+
+    async def display_menu(self):
+        menu_message = "Here are your menu options: "
+        await _play_tts(menu_message)
+        print(menu_message)
+        for key, value in self.menu.items():
+            menu_item_message = f"{key}: {value}"
+            print(menu_item_message)
+            await _play_tts(menu_item_message)
+
+    async def take_order(self):
+        # Select the menu item based on current_index
+        menu_keys = list(self.menu.keys())
+        if self.current_index < len(menu_keys):
+            item_number = menu_keys[self.current_index]
+            item_name = self.menu[item_number]
+            self.order_list.append(item_name)
+
+            order_confirmation = f"{item_name} has been added to your order."
+            await _play_tts(order_confirmation)
+            print(order_confirmation)
+
+            # Update current index for next run
+            self.current_index += 1
+            save_index(self.current_index)
+
+            # If we reach the end of the menu, reset index
+            if self.current_index >= len(menu_keys):
+                print("All menu items have been ordered. Resetting order index.")
+                self.current_index = 0
+                save_index(self.current_index)
+
+        else:
+            await _play_tts("No more items on the menu.")
+            print("No more items on the menu.")
+
+        await self.serve_order()  # Automatically serve the order
+
+    async def serve_order(self):
+        if not self.order_list:
+            await _play_tts("No orders to serve.")
+            print("No orders to serve.")
+            return
+        
+        serving_message = "I will now serve your order: " + ", ".join(self.order_list)
+        await _play_tts(serving_message)
+        print(serving_message)
+
+        # Move robot to serve the order
+        await self.move_robot_to_customer()
+        
+        thank_you_message = "Happy dinner! Thank you for your order!"
+        await _play_tts(thank_you_message)
+        print(thank_you_message)
+
+    async def move_robot_to_customer(self):
+        # Move 10 steps in the specified direction (forward)
+        for _ in range(10):
+            await self.move_robot(MoveRobotDirection.FORWARD, 1)  # Move 1 unit at a time
+            await asyncio.sleep(0.5)  # Wait a bit before the next step
+
+    async def move_robot(self, direction, distance):
+        move_cmd = MoveRobot(direction=direction, distance=distance)
+        result: MiniApiResultType = await move_cmd.execute()
+        if result != MiniApiResultType.OK:
+            print("Failed to move robot.")
+        else:
+            print(f"Moved {distance} unit(s) {direction.name.lower()}.")
+
+    async def run_waiter_bot(self):
+        await self.introduce_self()
+        await self.welcome_guest()
+        await self.take_order()
+
+# Connection and Device Setup
+async def get_device_by_name():
+    result: WiFiDevice = await Mini.get_device_by_name("00418", 10)  # Specify the correct robot ID
+    print(f"Device found: {result}")
+    return result
+
+async def connection(dev: WiFiDevice) -> bool:
+    try:
+        connected = await Mini.connect(dev)
+        if connected:
+            print("Connection successful!")
+        return connected
+    except Exception as e:
+        print(f"Connection error: {e}")
+        return False
+
+async def start_run_program():
+    try:
+        await Mini.enter_program()
+        print("Program started.")
+    except Exception as e:
+        print(f"Error starting the program: {e}")
+
+async def shutdown():
+    await Mini.disconnect()
+    print("Disconnected from the robot.")
+
+# Main Function
+async def main():
+    device: WiFiDevice = await get_device_by_name()
+    if device:
+        connected = await connection(device)
+        if connected:
+            await start_run_program()
+
+            # Initialize and run the waiter bot
+            waiter_bot = WaiterBot()
+            await waiter_bot.run_waiter_bot()  # Run Waiter bot function here
+
+        await shutdown()
+
+if __name__ == '__main__':
+    asyncio.run(main())
